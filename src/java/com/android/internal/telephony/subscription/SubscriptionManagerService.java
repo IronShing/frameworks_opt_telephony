@@ -2548,8 +2548,12 @@ public class SubscriptionManagerService extends ISub.Stub {
         // subscriptionInfos.
         List<String> iccIds = getIccIdsOfInsertedPhysicalSims();
 
+        // NX809J: a physical SIM that the user switched off (UICC apps disabled) must stay
+        // listed so it can be switched back on. The vendor RIL stops reporting the slot's
+        // ICCID / presence once the card's apps are disabled, so the iccIds check alone drops it.
         return mSubscriptionDatabaseManager.getAllSubscriptions().stream()
                 .filter(subInfo -> subInfo.isActive() || iccIds.contains(subInfo.getIccId())
+                        || (!subInfo.isEmbedded() && !subInfo.areUiccApplicationsEnabled())
                         || (mEuiccManager != null && mEuiccManager.isEnabled()
                         && subInfo.isEmbedded()));
     }
