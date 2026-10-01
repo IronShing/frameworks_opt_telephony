@@ -112,6 +112,7 @@ import com.android.internal.telephony.euicc.EuiccController;
 import com.android.internal.telephony.flags.FeatureFlags;
 import com.android.internal.telephony.satellite.SatelliteController;
 import com.android.internal.telephony.subscription.SubscriptionDatabaseManager.SubscriptionDatabaseManagerCallback;
+import com.android.internal.telephony.uicc.IccCardStatus;
 import com.android.internal.telephony.uicc.IccRecords;
 import com.android.internal.telephony.uicc.IccUtils;
 import com.android.internal.telephony.uicc.UiccCard;
@@ -1222,6 +1223,28 @@ public class SubscriptionManagerService extends ISub.Stub {
     }
 
     /**
+     * A physical SIM that the user disabled via {@link #setUiccApplicationsEnabled} stops
+     * reporting its ICCID on some modems, so it looks "removed" to the pre-U re-enable logic
+     * and would silently come back enabled on the next boot. Treat it as still inserted unless
+     * its slot positively reports an absent card.
+     */
+    private boolean isDisabledSimStillInSlot(@NonNull SubscriptionInfoInternal subInfo) {
+        if (subInfo.areUiccApplicationsEnabled()) return false;
+        int slotIndex = subInfo.getSimSlotIndex();
+        if (!SubscriptionManager.isValidSlotIndex(slotIndex)) return false;
+        UiccSlot slot = mUiccController.getUiccSlotForPhone(slotIndex);
+        if (slot == null || slot.isEuicc()) return false;
+        IccCardStatus.CardState state = slot.getCardState();
+        // null = radio unavailable (shutdown/SSR): card state unknown, do not touch.
+        boolean stillInSlot = state == null || state == IccCardStatus.CardState.CARDSTATE_PRESENT;
+        if (stillInSlot) {
+            logl("isDisabledSimStillInSlot: sub " + subInfo.getSubscriptionId() + " slot "
+                    + slotIndex + " cardState=" + state + ", keeping it disabled");
+        }
+        return stillInSlot;
+    }
+
+    /**
      * Set the subscription carrier id.
      *
      * @param subId Subscription id.
@@ -1799,10 +1822,11 @@ public class SubscriptionManagerService extends ISub.Stub {
                 List<String> iccIds = getIccIdsOfInsertedPhysicalSims();
                 mSubscriptionDatabaseManager.getAllSubscriptions().stream()
                         .filter(subInfo -> !iccIds.contains(subInfo.getIccId())
-                                && !subInfo.isEmbedded())
+                                && !subInfo.isEmbedded()
+                                && !isDisabledSimStillInSlot(subInfo))
                         .forEach(subInfo -> {
                             int subId = subInfo.getSubscriptionId();
-                            log("updateSubscription: Re-enable Uicc application on sub " + subId);
+                            logl("updateSubscription: Re-enable Uicc application on sub " + subId);
                             mSubscriptionDatabaseManager.setUiccApplicationsEnabled(subId, true);
                             // When sim is absent, set the port index to invalid port index.
                             // (pre-U behavior)
@@ -5058,8 +5082,16 @@ public class SubscriptionManagerService extends ISub.Stub {
             if (mSlotIndexToSubId.containsKey(slotIndex)) {
                 // Re-enable the UICC application , so it will be in enabled state when it becomes
                 // active again. (Pre-U behavior)
-                mSubscriptionDatabaseManager.setUiccApplicationsEnabled(
-                        mSlotIndexToSubId.get(slotIndex), true);
+                UiccSlot slot = mUiccController.getUiccSlotForPhone(slotIndex);
+                if (slot != null && !slot.isEuicc()) {
+                    // A physical slot's port only goes inactive on modem shutdown/restart, not
+                    // on user action; keep the user's disabled state.
+                    logl("updateSimStateForInactivePort: physical slot " + slotIndex
+                            + ", keeping uicc applications state");
+                } else {
+                    mSubscriptionDatabaseManager.setUiccApplicationsEnabled(
+                            mSlotIndexToSubId.get(slotIndex), true);
+                }
                 updateSubscription(slotIndex);
             }
             if (!TextUtils.isEmpty(iccId)) {
